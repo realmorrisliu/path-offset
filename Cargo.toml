@@ -2,6 +2,8 @@
 name = "path-offset"
 version = "0.1.0"
 edition = "2024"
+description = "A simple library for offsetting paths"
+license = "Apache-2.0"
 
 [dependencies]
 lyon = { version = "1.0.1", features = ["extra"] }
