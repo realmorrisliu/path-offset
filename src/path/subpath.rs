@@ -1,43 +1,79 @@
-use lyon::path::{Event, Iter as PathIter}; // 引入 lyon 的 Event 和迭代器类型 Iter，并重命名为 PathIter 以免混淆
+//! Provides an iterator to decompose a `Path` into its individual subpaths.
+//!
+//! A `Path` can contain multiple disconnected shapes (e.g., the letter 'i' has two).
+//! This module provides the [`SubpathIter`] iterator, which is created via the
+//! [`IntoIterator`] implementation for `&Path`. This allows you to easily loop
+//! over each continuous segment of a larger path.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use path_offset::path::Path;
+//! use lyon::path::Path as LyonPath;
+//!
+//! // Create a path with two separate subpaths.
+//! let mut builder = LyonPath::builder();
+//! builder.begin(lyon::math::point(0.0, 0.0));
+//! builder.line_to(lyon::math::point(10.0, 0.0));
+//! builder.end(false); // First subpath
+//! builder.begin(lyon::math::point(20.0, 0.0));
+//! builder.line_to(lyon::math::point(30.0, 0.0));
+//! builder.end(false); // Second subpath
+//! let lyon_path = builder.build();
+//!
+//! let path = Path::from(lyon_path);
+//!
+//! // Iterate over the subpaths.
+//! let mut subpath_count = 0;
+//! for subpath in &path {
+//!     subpath_count += 1;
+//!     // Each `subpath` is a `path_offset::path::Path` containing one continuous shape.
+//! }
+//!
+//! assert_eq!(subpath_count, 2);
+//! ```
 
-/// 一个迭代器，可以将一个包含多个图形的路径分解成单个的子路径。
+use lyon::path::{Event, Iter as PathIter};
+
+/// An iterator that decomposes a path containing multiple shapes into individual subpaths.
 ///
-/// 这个结构体及其 Iterator 实现，封装了从一个连续的路径事件流中
-/// 提取出独立子路径（从 Begin 到 End）的复杂状态管理逻辑。
+/// This struct and its `Iterator` implementation encapsulate the state management
+/// required to extract independent subpaths (from a `Begin` to an `End` event)
+/// from a continuous stream of path events.
+///
+/// It is typically not used directly, but rather through the `for` loop syntax on a `&Path`.
 pub struct SubpathIter<'a> {
-    /// 持有对底层 lyon 路径事件流的迭代器。
+    /// Holds an iterator over the underlying `lyon` path's event stream.
     iter: PathIter<'a>,
 }
 
 impl<'a> Iterator for SubpathIter<'a> {
-    // 每次迭代，我们都希望能产出一个完整的、我们自己的 Path 类型
+    // Each iteration yields a complete `Path` object representing one subpath.
     type Item = super::Path;
 
-    /// 实现 next() 方法，这是迭代器的核心。
-    /// 每次调用，它会尝试构建并返回下一个完整的子路径。
+    /// Implements the core logic of the iterator.
+    ///
+    /// Each call attempts to build and return the next complete subpath from the
+    /// underlying event stream.
     fn next(&mut self) -> Option<Self::Item> {
-        // 这个 next() 方法的逻辑，是您提供的原始 for 循环的直接翻译。
-
-        // 1. 创建一个 Path Builder 来构建子路径。
-        //    我们从流中寻找下一个 `Begin` 事件来启动它。
+        // 1. Find the next `Begin` event to start a new subpath builder.
         let mut builder;
         if let Some(event) = self.iter.find(|e| matches!(e, Event::Begin { .. })) {
             if let Event::Begin { at } = event {
-                // 找到了起点，初始化 builder
+                // Found a start point, initialize the builder.
                 let mut b = lyon::path::Path::builder();
                 b.begin(at);
                 builder = b;
             } else {
-                // 理论上不可能发生，因为 find 已经保证了是 Begin
+                // This is theoretically unreachable because `find` ensures it's a Begin event.
                 return None;
             }
         } else {
-            // 如果在整个事件流中再也找不到 Begin 事件，说明迭代结束了。
+            // No more `Begin` events are found in the stream, so iteration is complete.
             return None;
         }
 
-        // 2. 既然已经有了启动的 builder，我们继续消耗事件流，
-        //    直到遇到对应的 `End` 事件。
+        // 2. With an active builder, consume events until the corresponding `End` event is found.
         for event in &mut self.iter {
             match event {
                 Event::Line { to, .. } => {
@@ -52,45 +88,42 @@ impl<'a> Iterator for SubpathIter<'a> {
                     builder.cubic_bezier_to(ctrl1, ctrl2, to);
                 }
                 Event::End { close, .. } => {
-                    // 遇到了 End，一个子路径构建完成。
+                    // An `End` event signifies a complete subpath.
                     if close {
                         builder.close();
                     }
-                    // 构建出 lyon::path::Path，包装成我们自己的 Path，然后返回。
-                    // next() 方法的本次执行到此结束。
+                    // Build the lyon::path::Path, wrap it in our own Path type, and return it.
+                    // This concludes the current call to next().
                     return Some(super::Path {
                         inner: builder.build(),
                     });
                 }
                 Event::Begin { .. } => {
-                    // 如果在找到 End 之前又遇到了 Begin，
-                    // 这意味着上一个子路径没有正常结束。
-                    // 根据原始逻辑，我们应该结束当前构建并开始新的。
-                    // 在迭代器模式下，最简单的处理方式是就此打住，
-                    // 让下一次 next() 调用来处理这个新的 Begin 事件。
-                    // 但这意味着我们可能会丢失一个未闭合的路径。
-                    //
-                    // 为了忠实于您的原始代码（它会隐式地丢弃未完成的路径），
-                    // 我们在这里直接 break，然后返回 None。
+                    // If another `Begin` is encountered before an `End`, the previous
+                    // subpath was not properly terminated. In an iterator context,
+                    // the simplest approach is to stop here and let the next call to `next()`
+                    // process this new `Begin` event. This means the unclosed path is discarded.
                     break;
                 }
             }
         }
 
-        // 如果 for 循环正常结束（意味着迭代器耗尽了），
-        // 但我们还没返回，说明最后一个子路径没有 End 事件。
-        // 您的原始代码会忽略这种情况，所以我们也返回 None。
+        // If the loop finishes without returning, it means the iterator was exhausted
+        // but the last subpath did not have a corresponding `End` event.
+        // This incomplete subpath is ignored, and we return None.
         None
     }
 }
 
-/// 为我们自己的 Path 类型的引用实现 IntoIterator trait。
-/// 这使得可以直接在 for 循环中使用 `&Path`。
+/// Implements the `IntoIterator` trait for references to our `Path` type.
+///
+/// This is what allows a `&Path` to be used directly in a `for` loop,
+/// transparently creating a [`SubpathIter`] to drive the iteration.
 impl<'a> IntoIterator for &'a super::Path {
     type Item = super::Path;
     type IntoIter = SubpathIter<'a>;
 
-    /// 定义如何从一个 `&Path` 创建出我们的 `SubpathIter` 迭代器。
+    /// Defines how to create a [`SubpathIter`] from a `&Path`.
     fn into_iter(self) -> Self::IntoIter {
         SubpathIter {
             iter: self.inner.iter(),

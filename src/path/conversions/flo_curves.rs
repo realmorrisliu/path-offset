@@ -1,18 +1,34 @@
+//! Provides conversions to and from `flo_curves` path types.
+//!
+//! This module allows for interoperability with the `flo_curves` library by converting
+//! between this crate's [`Path`](crate::path::Path) and `flo_curves`'s `SimpleBezierPath`
+//! and `Vec<Curve<Coord2>>`. This is essential for leveraging `flo_curves`'s path
+//! manipulation algorithms.
+
 use flo_curves::{
-    bezier::{
-        path::{BezierPathBuilder, SimpleBezierPath},
-        Curve,
-    },
     BezierCurve, Coord2, Coordinate,
+    bezier::{
+        Curve,
+        path::{BezierPathBuilder, SimpleBezierPath},
+    },
 };
 use lyon::path::Event;
 
 use crate::path::point::PointConvert;
 
+/// Converts a reference to a [`Path`](crate::path::Path) into a `flo_curves::SimpleBezierPath`.
+///
+/// This conversion processes the `lyon::path::Event` stream of the input path:
+/// - `Event::Line`, `Event::Cubic`: Translated directly to `flo_curves` equivalents.
+/// - `Event::Quadratic`: Mathematically converted into a cubic Bézier curve, as
+///   `flo_curves` primarily works with cubic curves.
+/// - `Event::End`: If the path is not marked as closed by `lyon`, a closing line segment
+///   is added to ensure the `flo_curves` path is properly closed, which is often a
+///   requirement for path algorithms.
 impl From<&crate::path::Path> for SimpleBezierPath {
     fn from(path: &crate::path::Path) -> SimpleBezierPath {
         let mut builder = BezierPathBuilder::<SimpleBezierPath>::start(Coord2::from((0.0, 0.0)));
-        let mut current_pos = Coord2::from((0.0, 0.0)); // 跟踪当前位置
+        let mut current_pos = Coord2::from((0.0, 0.0)); // Track current position
 
         for event in path.inner.iter() {
             match event {
@@ -27,7 +43,7 @@ impl From<&crate::path::Path> for SimpleBezierPath {
                     current_pos = to_point;
                 }
                 Event::Quadratic { ctrl, to, .. } => {
-                    // 二次贝塞尔转换为三次贝塞尔控制点
+                    // Convert quadratic Bézier to cubic control points
                     let cp1: Coord2 =
                         current_pos + (ctrl.use_as::<Coord2>() - current_pos) * (2.0 / 3.0);
                     let cp2: Coord2 = to.use_as::<Coord2>()
@@ -44,16 +60,15 @@ impl From<&crate::path::Path> for SimpleBezierPath {
                     builder = builder.curve_to((ctrl1.use_as(), ctrl2.use_as()), to_point);
                     current_pos = to_point;
                 }
-                // --- 这是关键的修改 ---
                 Event::End { first, close, .. } => {
-                    // 只在 lyon 报告路径未闭合时才手动添加闭合线段
+                    // Manually add a closing line segment only if lyon reports the path as open.
                     if !close {
-                        // 同样检查一下，避免浮点误差导致添加一个极小的线段
+                        // Also check to avoid adding a minuscule line due to floating point errors.
                         if current_pos.distance_to(&first.use_as()) > 1e-6 {
                             builder = builder.line_to(first.use_as());
                         }
                     }
-                    // 如果 close 为 true，我们什么都不做，因为路径已经完美闭合了。
+                    // If `close` is true, do nothing, as the path is already perfectly closed.
                 }
             }
         }
@@ -62,6 +77,11 @@ impl From<&crate::path::Path> for SimpleBezierPath {
     }
 }
 
+/// Converts a vector of `flo_curves::Curve`s into a [`Path`](crate::path::Path).
+///
+/// Each `Curve` is assumed to be a cubic Bézier segment. The conversion creates a
+/// new `Path` where each curve becomes a separate, unclosed subpath consisting of a
+/// single cubic Bézier segment.
 impl From<&Vec<Curve<Coord2>>> for crate::path::Path {
     fn from(value: &Vec<Curve<Coord2>>) -> Self {
         let mut builder = lyon::path::Path::builder();
@@ -92,6 +112,11 @@ impl From<&Vec<Curve<Coord2>>> for crate::path::Path {
     }
 }
 
+/// Converts a `flo_curves::SimpleBezierPath` back into a [`Path`](crate::path::Path).
+///
+/// This reconstructs a `lyon` path from the `flo_curves` representation. It handles
+/// both lines and cubic curves. The resulting path is explicitly closed by adding a
+/// line segment back to the start point and calling `close()`.
 impl From<&SimpleBezierPath> for crate::path::Path {
     fn from(value: &SimpleBezierPath) -> Self {
         let (start_point, segments) = value;
@@ -108,6 +133,7 @@ impl From<&SimpleBezierPath> for crate::path::Path {
                 continue;
             }
 
+            // A line is represented in SimpleBezierPath where control points align with endpoints.
             let is_line = ctrl1 == last_point && ctrl2 == to;
 
             if is_line {
@@ -119,7 +145,7 @@ impl From<&SimpleBezierPath> for crate::path::Path {
             last_point = to;
         }
 
-        // 闭合路径：回到起点并调用 close()
+        // Close the path by returning to the start point.
         builder.line_to(start_point.use_as());
         builder.close();
 

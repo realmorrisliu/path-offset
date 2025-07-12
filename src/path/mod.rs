@@ -1,3 +1,8 @@
+//! Defines the `Path` struct and related utilities for path manipulation.
+//!
+//! This module provides the core `Path` struct, which represents a geometric path,
+//! and includes functionality for parsing, manipulating, and iterating over paths.
+
 use std::{fmt::Display, str::FromStr};
 
 use lyon::path::Event;
@@ -8,58 +13,79 @@ pub mod conversions;
 pub mod point;
 pub mod subpath;
 
+/// Represents a geometric path, composed of one or more subpaths.
+///
+/// A `Path` can be created from an SVG path string and can be iterated over
+/// to process its individual subpaths. It also provides utilities for
+/// analyzing path properties, such as finding the outermost contour.
 #[derive(Debug, Clone)]
 pub struct Path {
     inner: lyon::path::Path,
 }
 
 impl Path {
+    /// Returns an iterator over the subpaths of this path.
+    ///
+    /// Each item in the iterator is a `Path` representing a single subpath.
     pub fn iter(&self) -> impl Iterator<Item = Path> + '_ {
         self.into_iter()
     }
 
+    /// Checks if the path is closed.
+    ///
+    /// A path is considered closed if it ends with a `Close` event.
     pub fn is_closed(&self) -> bool {
         self.inner
             .iter()
             .any(|e| matches!(e, Event::End { close: true, .. }))
     }
 
-    /// 智能地查找并返回代表最外层轮廓的子路径。
+    /// Find and return the subpath that represents the outermost shell.
     ///
-    /// 这个方法会优先使用快速的“面积最大”启发式算法。
-    /// 如果该算法无法找到结果，则会回退到更精确但更慢的“几何包含”算法。
+    /// This method first attempts to use a fast "largest area" heuristic.
+    /// If that fails to produce a result, it falls back to a more accurate but slower
+    /// "geometric containment" algorithm.
+    ///
+    /// # Returns
+    ///
+    /// An `Option<Path>` containing the outermost shell if found, otherwise `None`.
     pub fn find_outer_shell(&self) -> Option<Path> {
         let subpaths: Vec<Path> = self.iter().collect();
 
         match subpaths.len() {
-            // 情况一：没有子路径
+            // Case 1: No subpaths
             0 => None,
 
-            // 情况二：只有一个子路径，那它自身就是外壳
-            // 我们用 .into_iter().next() 来消耗 Vec 并取出唯一的元素
-            // 这样可以避免克隆（.clone()）。
+            // Case 2: Only one subpath, which is the shell by definition.
+            // We use .into_iter().next() to consume the Vec and take the single element
+            // without needing to clone it.
             1 => subpaths.into_iter().next(),
 
-            // 情况三：有多个子路径，执行我们的“智能”查找逻辑
+            // Case 3: Multiple subpaths, execute the "smart" finding logic.
             _ => {
-                // 首先尝试快速的面积启发式算法
+                // First, try the fast area heuristic.
                 find_shell_by_area(&subpaths)
-                    // 如果面积法没有返回任何结果，则回退到精确的几何包含算法
+                    // If the area method returns nothing, fall back to the precise geometric containment algorithm.
                     .or_else(|| find_shell_by_containment(&subpaths))
             }
         }
     }
 
+    /// Checks if this path's bounding box intersects with another path's bounding box.
     fn intersect_with(&self, other: &Path) -> bool {
         let bbox_a = lyon::algorithms::aabb::bounding_box(self.inner.iter());
         let bbox_b = lyon::algorithms::aabb::bounding_box(other.inner.iter());
         bbox_a.intersects(&bbox_b)
     }
 
+    /// Checks if this path is geometrically contained within another path.
     fn contained_by(&self, other_path: &Path) -> bool {
+        // A path cannot contain itself.
         !std::ptr::eq(self, other_path)
+            // Both paths must be closed to have a well-defined interior.
             && self.is_closed()
             && other_path.is_closed()
+            // Check if the first point of this path is inside the other path.
             && self.inner.first_endpoint().map_or(false, |(pt, _)| {
                 lyon::algorithms::hit_test::hit_test_path(
                     &pt,
@@ -71,6 +97,11 @@ impl Path {
     }
 }
 
+/// Parses a `Path` from an SVG path data string.
+///
+/// # Errors
+///
+/// Returns a `PathError` if the SVG path data is invalid.
 impl FromStr for Path {
     type Err = PathError;
 
@@ -90,6 +121,7 @@ impl FromStr for Path {
     }
 }
 
+/// Formats the `Path` as an SVG path data string.
 impl Display for Path {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let path_slice = self.inner.as_slice();
@@ -131,31 +163,31 @@ impl Display for Path {
     }
 }
 
-/// 策略一：通过计算有向面积找到最外层轮廓。
-/// 这是一个快速的启发式算法。
+/// Strategy 1: Find the outermost shell by calculating signed area.
+/// This is a fast heuristic.
 fn find_shell_by_area(paths: &[Path]) -> Option<Path> {
     paths
         .iter()
-        // 只考虑闭合路径，因为只有闭合路径能定义内外
+        // Only consider closed paths, as only they can define an inside and outside.
         .filter(|p| p.is_closed())
         .max_by(|a, b| {
             let area_a = lyon::algorithms::area::approximate_signed_area(0.01, a.inner.iter());
             let area_b = lyon::algorithms::area::approximate_signed_area(0.01, b.inner.iter());
-            // total_cmp 可以处理 f32 的 NaN 和无穷大等特殊情况
+            // total_cmp can handle special f32 cases like NaN and infinity.
             area_a.total_cmp(&area_b)
         })
-        .cloned() // 从 &Path 得到 Path
+        .cloned()
 }
 
-/// 策略二：通过检查几何包含关系找到最外层轮廓。
-/// 这是一个精确但计算成本较高的算法。
+/// Strategy 2: Find the outermost shell by checking for geometric containment.
+/// This is a precise but computationally more expensive algorithm.
 fn find_shell_by_containment(paths: &[Path]) -> Option<Path> {
     paths
         .iter()
         .find(|this_path| {
-            // 寻找一个不被任何其他路径包含的路径
+            // Find a path that is not contained by any other path.
             !paths.iter().any(|other_path| {
-                // 使用我们之前设计好的辅助方法
+                // Use our previously defined helper methods.
                 this_path.intersect_with(other_path) && this_path.contained_by(other_path)
             })
         })
